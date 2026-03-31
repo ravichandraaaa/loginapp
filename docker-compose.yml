@@ -1,0 +1,144 @@
+version: '3.9'
+
+services:
+
+  # ── Data tier ────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: loginapp-postgres
+    environment:
+      POSTGRES_DB:       loginapp
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - loginapp-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: loginapp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - loginapp-net
+
+  # ── Application tier ─────────────────────────────────────────
+
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    container_name: loginapp-user-service
+    environment:
+      PORT:        4002
+      DB_HOST:     postgres
+      DB_PORT:     5432
+      DB_NAME:     loginapp
+      DB_USER:     postgres
+      DB_PASSWORD: postgres
+    ports:
+      - "4002:4002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - loginapp-net
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    container_name: loginapp-notification-service
+    environment:
+      PORT: 4003
+    ports:
+      - "4003:4003"
+    networks:
+      - loginapp-net
+    restart: unless-stopped
+
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: loginapp-auth-service
+    environment:
+      PORT:               4001
+      JWT_SECRET:         change-this-in-production-secret
+      JWT_REFRESH_SECRET: change-this-refresh-secret-too
+      REDIS_URL:          redis://redis:6379
+      USER_SERVICE_URL:   http://user-service:4002
+      NOTIFY_SERVICE_URL: http://notification-service:4003
+    ports:
+      - "4001:4001"
+    depends_on:
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    networks:
+      - loginapp-net
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: loginapp-api-gateway
+    environment:
+      PORT:               4000
+      FRONTEND_URL:       http://localhost:3000
+      AUTH_SERVICE_URL:   http://auth-service:4001
+      USER_SERVICE_URL:   http://user-service:4002
+      NOTIFY_SERVICE_URL: http://notification-service:4003
+    ports:
+      - "4000:4000"
+    depends_on:
+      - auth-service
+      - user-service
+      - notification-service
+    networks:
+      - loginapp-net
+    restart: unless-stopped
+
+  # ── Presentation tier ─────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: loginapp-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - loginapp-net
+    restart: unless-stopped
+
+# ── Volumes & Networks ────────────────────────────────────────
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  loginapp-net:
+    driver: bridge
